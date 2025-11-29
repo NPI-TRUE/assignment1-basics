@@ -117,12 +117,29 @@ class BPETokenizer():
         self.vocab = bytes_to_unicode()
         self.merges = []
         self.PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+        # Cache mapping token (str/bytes) -> tuple of decoder values
+        # Avoid recomputing tuple(self.decoder[ch] for ch in token) repeatedly
+        self._bytes_cache = {}
 
     def tie_key(self, kv):
         pair, cnt = kv
         left_tok, right_tok = pair
-        left_bytes = tuple(self.decoder[ch] for ch in left_tok)
-        right_bytes = tuple(self.decoder[ch] for ch in right_tok)
+        # Use a small per-instance cache to avoid repeated expensive
+        # iteration/conversion over token characters.
+        cache = self._bytes_cache
+
+        def tok_to_bytes(tok):
+            # tok is expected to be hashable (str or bytes). If not,
+            # fall back to converting via tuple(tok).
+            key = tok if isinstance(tok, (str, bytes, tuple)) else tuple(tok)
+            if key in cache:
+                return cache[key]
+            converted = tuple(self.decoder[ch] for ch in tok)
+            cache[key] = converted
+            return converted
+
+        left_bytes = tok_to_bytes(left_tok)
+        right_bytes = tok_to_bytes(right_tok)
         return (cnt, (left_bytes, right_bytes))
 
     def train(
@@ -180,7 +197,7 @@ class BPETokenizer():
 
             token = len(self.vocab)
             self.vocab[token] = pair[0] + pair[1]
-            self.decoder[(pair[0], pair[1])] = token
+            self.decoder[pair[0] + pair[1]] = token
             self.merges.append((pair[0], pair[1]))
 
             for idx in list(ids[pair]):
@@ -234,8 +251,13 @@ class BPETokenizer():
             del pairs[pair]
             del ids[pair]
 
-            
-        return (self.vocab, [
+
+        final_vocab = {
+            k: bytes([self.decoder[ch] for ch in v])
+            for k, v in self.vocab.items()
+        }
+
+        return (final_vocab, [
             (
                 bytes([self.decoder[token] for token in merge_token_1]),
                 bytes([self.decoder[token] for token in merge_token_2])
@@ -247,9 +269,9 @@ class BPETokenizer():
 
 if __name__ == "__main__":
     bpe = BPETokenizer()
-    vocab, merges = bpe.train("../.data/TinyStoriesV2-GPT4-train.txt", 500, ["<|endoftext|>"])
+    #vocab, merges = bpe.train("../.data/TinyStoriesV2-GPT4-train.txt", 500, ["<|endoftext|>"])
     vocab, merges = bpe.train("../tests/fixtures/corpus.en", 500, ["<|endoftext|>"])
 
-    print(type(merges))
+    print(vocab)
     for merge in merges:
         print(merge) #116 104
