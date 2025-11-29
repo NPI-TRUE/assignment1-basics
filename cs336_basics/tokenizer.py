@@ -7,6 +7,25 @@ import multiprocessing
 
 from tests.common import gpt2_bytes_to_unicode
 
+def bytes_to_unicode():
+    bs = list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
+    cs = bs[:]
+    # now get the representations of the other 68 integers that do need shifting
+    # each will get mapped chr(256 + n), where n will grow from 0...67 in the loop
+    # Get printable representations of the remaining integers 68 integers.
+    n = 0
+    for b in range(2**8):
+        if b not in bs:
+            # If this integer isn't in our list of visually-representable
+            # charcters, then map it to the next nice character (offset by 256)
+            bs.append(b)
+            cs.append(2**8 + n)
+            n += 1
+    characters = [chr(n) for n in cs]
+    d = dict(zip(bs, characters))
+    return d
+
+
 
 def find_chunk_boundaries(
     file: BinaryIO,
@@ -93,12 +112,18 @@ def get_pre_tokens(input_path: str, PAT):
     return dict(words)
 
 
-
 class BPETokenizer():
     def __init__(self):
-        self.vocab = gpt2_bytes_to_unicode()
+        self.vocab = bytes_to_unicode()
         self.merges = []
         self.PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+    def tie_key(self, kv):
+        pair, cnt = kv
+        left_tok, right_tok = pair
+        left_bytes = tuple(self.decoder[ch] for ch in left_tok)
+        right_bytes = tuple(self.decoder[ch] for ch in right_tok)
+        return (cnt, (left_bytes, right_bytes))
 
     def train(
         self,
@@ -150,10 +175,12 @@ class BPETokenizer():
 
 
         for _ in range(num_merges):
-            pair, pcnt = max(pairs.items(), key=lambda kv: (kv[1], (kv[0][0], kv[0][1])))
+
+            pair, pcnt = max(pairs.items(), key=self.tie_key)
 
             token = len(self.vocab)
             self.vocab[token] = pair[0] + pair[1]
+            self.decoder[(pair[0], pair[1])] = token
             self.merges.append((pair[0], pair[1]))
 
             for idx in list(ids[pair]):
@@ -167,14 +194,20 @@ class BPETokenizer():
                         left = (word[i - 1], word[i]) if i - 1 >= 0 else None
                         right = (word[i + 1], word[i + 2]) if i + 2 < len(word) else None
                         
-                        if left:
+                        if left in pairs:
                             pairs[left] -= cnt
+
+                            if pairs[left] <= 0:
+                                del pairs[left]
                             
                             if idx in ids[left]:
                                 ids[left].remove(idx)
 
-                        if right:
+                        if right in pairs:
                             pairs[right] -= cnt
+
+                            if pairs[right] <= 0:
+                                del pairs[right]
                             
                             if idx in ids[right]:
                                 ids[right].remove(idx)
@@ -214,9 +247,9 @@ class BPETokenizer():
 
 if __name__ == "__main__":
     bpe = BPETokenizer()
-    #vocab, merges = bpe.train("../.data/TinyStoriesV2-GPT4-valid.txt", 500, ["<|endoftext|>"])
+    vocab, merges = bpe.train("../.data/TinyStoriesV2-GPT4-train.txt", 500, ["<|endoftext|>"])
     vocab, merges = bpe.train("../tests/fixtures/corpus.en", 500, ["<|endoftext|>"])
 
     print(type(merges))
-#    for merge in merges:
-#        print(merge) #116 104
+    for merge in merges:
+        print(merge) #116 104
