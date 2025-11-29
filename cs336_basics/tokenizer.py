@@ -82,6 +82,7 @@ def count_chunk(args):
     with open(input_path, "rb") as f:
         f.seek(start)
         chunk = f.read(end - start).decode("utf-8", errors="ignore")
+        chunk = re.sub(r'<\|.*?\|>', '', chunk)
 
     words = defaultdict(int)
 
