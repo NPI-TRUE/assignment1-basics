@@ -5,6 +5,7 @@ import regex as re
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 import json
+import time
 
 from tests.common import gpt2_bytes_to_unicode
 
@@ -105,11 +106,18 @@ def get_pre_tokens(input_path: str, speical_tokens: list, PAT: str) -> dict:
 
     for start, end in zip(boundaries[:-1], boundaries[1:]):
         chunks.append((input_path, speical_tokens, start, end, PAT))
+
+    tot_cunks = len(chunks)
+
+    print("Start reading chunks")
     
     with ProcessPoolExecutor(max_workers=num_processes) as executor:
-        for counter in executor.map(count_chunk, chunks):
+        for i, counter in enumerate(executor.map(count_chunk, chunks)):
+            print(f"Chunk: {i + 1}/{tot_cunks}")
+
             words += counter
 
+    print()
 
     return dict(words)
 
@@ -124,27 +132,6 @@ class BPETokenizer():
         # Cache mapping token (str/bytes) -> tuple of decoder values
         # Avoid recomputing tuple(self.decoder[ch] for ch in token) repeatedly
         self._bytes_cache = {}
-
-    def tie_key(self, kv):
-        pair, cnt = kv
-        left_tok, right_tok = pair
-        # Use a small per-instance cache to avoid repeated expensive
-        # iteration/conversion over token characters.
-        cache = self._bytes_cache
-
-        def tok_to_bytes(tok):
-            # tok is expected to be hashable (str or bytes). If not,
-            # fall back to converting via tuple(tok).
-            key = tok if isinstance(tok, (str, bytes, tuple)) else tuple(tok)
-            if key in cache:
-                return cache[key]
-            converted = tuple(self.decoder[ch] for ch in tok)
-            cache[key] = converted
-            return converted
-
-        left_bytes = tok_to_bytes(left_tok)
-        right_bytes = tok_to_bytes(right_tok)
-        return (cnt, (left_bytes, right_bytes))
 
     def train(
         self,
@@ -191,18 +178,37 @@ class BPETokenizer():
             for a, b in zip(word, word[1:]):
                 pair = (a, b)
 
+                self._bytes_cache[a] = (self.decoder[a],)
+                self._bytes_cache[b] = (self.decoder[b],)
                 pairs[pair] += cnt
                 ids[pair].append(idx)
 
+        print(f"Debug       len(pairs): {len(pairs)}  -  len(words): {len(words)}  -  len(ids): {len(ids)}")
+        print()
+        exit(0)
 
-        for _ in range(num_merges):
+        print("Start merging")
+        start_time = time.time()
+        for iMerge in range(num_merges):
 
-            pair, pcnt = max(pairs.items(), key=self.tie_key)
+            if iMerge % 100 == 0 and iMerge != 0:
+                tot_time = time.time() - start_time
+                print(f"Merges: {iMerge}/{num_merges}, time: {tot_time:0.2f} sec, time to end: {(num_merges / iMerge) * tot_time:0.2f} sec")
+                start_time = time.time()
+
+            if not pair:
+                break
+
+            pair, pcnt = max(pairs.items(), key=lambda kv: (kv[1], (self._bytes_cache[kv[0][0]], self._bytes_cache[kv[0][1]])))
+            
+            print(f"Merge: {iMerge}  -  {pair}")
 
             token = len(self.vocab)
             self.vocab[token] = pair[0] + pair[1]
             self.decoder[pair[0] + pair[1]] = token
             self.merges.append((pair[0], pair[1]))
+
+            self._bytes_cache[pair[0] + pair[1]] = tuple(self.decoder[ch] for ch in pair[0] + pair[1])
 
             for idx in list(ids[pair]):
                 word, cnt = words[idx]
@@ -301,10 +307,19 @@ class BPETokenizer():
         
 
 if __name__ == "__main__":
+    import cProfile, pstats
+    
+    pr = cProfile.Profile()
+    pr.enable()
+    
     bpe = BPETokenizer()
-    #vocab, merges = bpe.train("../.data/TinyStoriesV2-GPT4-train.txt", 500, ["<|endoftext|>"])
-    vocab, merges = bpe.train("../tests/fixtures/corpus.en", 500, ["<|endoftext|>"])
+    vocab, merges = bpe.train("../.data/TinyStoriesV2-GPT4-train.txt", 10000, ["<|endoftext|>"]) # time to execute: 279.89 secs
+    #vocab, merges = bpe.train("../.data/owt_valid.txt", 10000, ["<|endoftext|>"]) # 
+    #vocab, merges = bpe.train("../tests/fixtures/corpus.en", 500, ["<|endoftext|>"])
 
-    print(vocab)
-    print()
-    print(merges)
+    pr.disable()
+    stats_path = "tokenizer_run.prof"
+    print(f"Profile saved to {stats_path}")
+
+    ps = pstats.Stats(pr).sort_stats("cumtime")
+    ps.print_stats(30)
