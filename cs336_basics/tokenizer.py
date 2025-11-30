@@ -75,25 +75,25 @@ def find_chunk_boundaries(
 
 
 def count_chunk(args):
-    input_path, start, end, PAT = args
+    input_path, special_tokens, start, end, PAT = args
 
     PAT = re.compile(PAT)
 
     with open(input_path, "rb") as f:
         f.seek(start)
         chunk = f.read(end - start).decode("utf-8", errors="ignore")
-        chunk = re.sub(r'<\|.*?\|>', '', chunk)
 
     words = defaultdict(int)
 
-    for match in re.finditer(PAT, chunk):
-        word = match.group()
-        words[tuple(word.encode('utf-8'))] += 1
+    for text in re.split('|'.join(special_tokens), chunk):
+        for match in re.finditer(PAT, text):
+            word = match.group()
+            words[tuple(word.encode('utf-8'))] += 1
 
     return Counter(words)
 
 
-def get_pre_tokens(input_path: str, PAT):
+def get_pre_tokens(input_path: str, speical_tokens: list, PAT: str) -> dict:
     with open(input_path, "rb") as f:
         num_processes = min(10, multiprocessing.cpu_count())
         boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
@@ -103,7 +103,7 @@ def get_pre_tokens(input_path: str, PAT):
     chunks = []
 
     for start, end in zip(boundaries[:-1], boundaries[1:]):
-        chunks.append((input_path, start, end, PAT))
+        chunks.append((input_path, speical_tokens, start, end, PAT))
     
     with ProcessPoolExecutor(max_workers=num_processes) as executor:
         for counter in executor.map(count_chunk, chunks):
@@ -178,7 +178,7 @@ class BPETokenizer():
         self.decoder = {v: k for k, v in self.vocab.items()}
 
         num_merges = vocab_size - len(self.vocab)
-        pre_tokens = get_pre_tokens(input_path, self.PAT)
+        pre_tokens = get_pre_tokens(input_path, self.special_tokens, self.PAT)
         words = [([self.vocab[token] for token in word], cnt) for word, cnt in pre_tokens.items()]
 
         pairs = defaultdict(int)
