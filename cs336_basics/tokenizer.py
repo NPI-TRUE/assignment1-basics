@@ -4,6 +4,7 @@ from collections import Counter, defaultdict
 import regex as re
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
+import json
 
 from tests.common import gpt2_bytes_to_unicode
 
@@ -118,6 +119,8 @@ class BPETokenizer():
         self.vocab = bytes_to_unicode()
         self.merges = []
         self.PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+        self.folder = '.data'
+        os.makedirs(self.folder, exist_ok=True)
         # Cache mapping token (str/bytes) -> tuple of decoder values
         # Avoid recomputing tuple(self.decoder[ch] for ch in token) repeatedly
         self._bytes_cache = {}
@@ -258,6 +261,8 @@ class BPETokenizer():
             for k, v in self.vocab.items()
         }
 
+        self.save()
+
         return (final_vocab, [
             (
                 bytes([self.decoder[token] for token in merge_token_1]),
@@ -267,6 +272,33 @@ class BPETokenizer():
             for merge_token_1, merge_token_2 in self.merges
         ])
 
+    def save(self):
+        with open(f'{self.folder}/bpe_vocab.json', 'w', encoding='utf-8') as f:
+            json.dump(self.decoder, f)
+
+        with open(f'{self.folder}/bpe_merges.json', 'w', encoding='utf-8') as f:
+            json.dump(self.merges, f)
+
+    def load(self):
+        with open(f'{self.folder}/bpe_vocab.json', 'r', encoding='utf-8') as f:
+            self.decoder = json.load(f)
+
+            self.vocab = {
+                v: bytes([self.decoder[ch] for ch in k])
+                for k,v in self.decoder.items()
+            }
+
+        with open(f'{self.folder}/bpe_merges.json', 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+            self.merges = [
+                (
+                    bytes([self.decoder[token] for token in merge_token_1]),
+                    bytes([self.decoder[token] for token in merge_token_2])
+                )
+                for merge_token_1, merge_token_2 in data
+            ]
+        
 
 if __name__ == "__main__":
     bpe = BPETokenizer()
@@ -274,5 +306,5 @@ if __name__ == "__main__":
     vocab, merges = bpe.train("../tests/fixtures/corpus.en", 500, ["<|endoftext|>"])
 
     print(vocab)
-    for merge in merges:
-        print(merge) #116 104
+    print()
+    print(merges)
