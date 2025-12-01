@@ -6,8 +6,19 @@ from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 import json
 import time
+import heapq
 
 from tests.common import gpt2_bytes_to_unicode
+
+class Token:
+    def __init__(self, val):
+        self.val = val
+    def __lt__(self, other):
+        return self.val > other.val   # invert lexicographic order
+    def __eq__(self, other):
+        return self.val == other.val
+    def __repr__(self):
+        return repr(self.val)
 
 def bytes_to_unicode():
     bs = list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
@@ -26,8 +37,6 @@ def bytes_to_unicode():
     characters = [chr(n) for n in cs]
     d = dict(zip(bs, characters))
     return d
-
-
 
 def find_chunk_boundaries(
     file: BinaryIO,
@@ -75,7 +84,6 @@ def find_chunk_boundaries(
     # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
     return sorted(set(chunk_boundaries))
 
-
 def count_chunk(args):
     input_path, special_tokens, start, end, PAT = args
 
@@ -94,8 +102,8 @@ def count_chunk(args):
 
     return Counter(words)
 
-
 def get_pre_tokens(input_path: str, speical_tokens: list, PAT: str) -> dict:
+    print(f"Total cpu: {multiprocessing.cpu_count()}")
     with open(input_path, "rb") as f:
         num_processes = min(10, multiprocessing.cpu_count())
         boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
@@ -173,6 +181,7 @@ class BPETokenizer():
 
         pairs = defaultdict(int)
         ids = defaultdict(list)
+        pq = []
 
         for idx, (word, cnt) in enumerate(words):
             for a, b in zip(word, word[1:]):
@@ -183,25 +192,42 @@ class BPETokenizer():
                 pairs[pair] += cnt
                 ids[pair].append(idx)
 
-        print(f"Debug       len(pairs): {len(pairs)}  -  len(words): {len(words)}  -  len(ids): {len(ids)}")
-        print()
-        exit(0)
+        for (a, b), cnt in pairs.items():
+            heapq.heappush(pq, (-cnt, Token([self.decoder[a]]), Token([self.decoder[b]]), tuple((a, b))))
+
+        #print(f"Debug       len(pairs): {len(pairs)}  -  len(words): {len(words)}  -  len(ids): {len(ids)}")
+        #print()
+        #exit(0)
 
         print("Start merging")
         start_time = time.time()
-        for iMerge in range(num_merges):
+        for iMerge in range(1, num_merges + 1):
 
-            if iMerge % 100 == 0 and iMerge != 0:
-                tot_time = time.time() - start_time
-                print(f"Merges: {iMerge}/{num_merges}, time: {tot_time:0.2f} sec, time to end: {(num_merges / iMerge) * tot_time:0.2f} sec")
-                start_time = time.time()
+
+            tot_time = time.time() - start_time
+            print(f"Merges: {iMerge}/{num_merges}, time: {tot_time:0.2f} sec, time to end: {((num_merges / iMerge) * tot_time) / 60:0.2f} min")
+            start_time = time.time()
 
             if not pair:
                 break
 
-            pair, pcnt = max(pairs.items(), key=lambda kv: (kv[1], (self._bytes_cache[kv[0][0]], self._bytes_cache[kv[0][1]])))
-            
-            print(f"Merge: {iMerge}  -  {pair}")
+            tmp_pair, tmp_pcnt = max(pairs.items(), key=lambda kv: (kv[1], (self._bytes_cache[kv[0][0]], self._bytes_cache[kv[0][1]])))
+
+            pcnt, pa, pb, pair = heapq.heappop(pq)
+            pcnt = -pcnt
+
+            while (pairs[pair] != pcnt):
+                if (pairs[pair] > 0):
+                    heapq.heappush(pq, (-pairs[pair], pa, pb, pair))
+                else:
+                    del pairs[pair]
+
+                pcnt, pa, pb, pair = heapq.heappop(pq)
+                pcnt = -pcnt
+
+            #print(f"{tmp_pair == pair}  -  {tmp_pair}, {tmp_pcnt}  -  {pair}, {pcnt}")
+
+            #print(f"Merge: {iMerge}  -  {pair}")
 
             token = len(self.vocab)
             self.vocab[token] = pair[0] + pair[1]
@@ -209,6 +235,8 @@ class BPETokenizer():
             self.merges.append((pair[0], pair[1]))
 
             self._bytes_cache[pair[0] + pair[1]] = tuple(self.decoder[ch] for ch in pair[0] + pair[1])
+
+            decoded = Token([self.decoder[ch] for ch in pair[0] + pair[1]])
 
             for idx in list(ids[pair]):
                 word, cnt = words[idx]
@@ -222,19 +250,15 @@ class BPETokenizer():
                         right = (word[i + 1], word[i + 2]) if i + 2 < len(word) else None
                         
                         if left in pairs:
-                            pairs[left] -= cnt
-
-                            if pairs[left] <= 0:
-                                del pairs[left]
+                            if pairs[left] > 0:
+                                pairs[left] -= cnt
                             
                             if idx in ids[left]:
                                 ids[left].remove(idx)
 
                         if right in pairs:
-                            pairs[right] -= cnt
-
-                            if pairs[right] <= 0:
-                                del pairs[right]
+                            if pairs[right] > 0:
+                                pairs[right] -= cnt
                             
                             if idx in ids[right]:
                                 ids[right].remove(idx)
@@ -243,12 +267,16 @@ class BPETokenizer():
                         new_word.append(self.vocab[token])
 
                         if i - 1 >= 0:
-                            pairs[(word[i - 1], self.vocab[token])] += cnt
-                            ids[(word[i - 1], self.vocab[token])].append(idx)
+                            tpair = (word[i - 1], self.vocab[token]) 
+                            pairs[tpair] += cnt
+                            ids[tpair].append(idx)
+                            heapq.heappush(pq, (-pairs[tpair], Token([self.decoder[ch] for ch in word[i - 1]]), decoded, (word[i - 1], self.vocab[token])))
 
                         if i + 2 < len(word):
-                            pairs[(self.vocab[token], word[i + 2])] += cnt
-                            ids[(self.vocab[token], word[i + 2])].append(idx)
+                            tpair = (self.vocab[token], word[i + 2]) 
+                            pairs[tpair] += cnt
+                            ids[tpair].append(idx)
+                            heapq.heappush(pq, (-pairs[tpair], decoded, Token([self.decoder[ch] for ch in word[i + 2]]), (self.vocab[token], word[i + 2])))
 
                         i += 2
                     else:
@@ -313,8 +341,8 @@ if __name__ == "__main__":
     pr.enable()
     
     bpe = BPETokenizer()
-    vocab, merges = bpe.train("../.data/TinyStoriesV2-GPT4-train.txt", 10000, ["<|endoftext|>"]) # time to execute: 279.89 secs
-    #vocab, merges = bpe.train("../.data/owt_valid.txt", 10000, ["<|endoftext|>"]) # 
+    #vocab, merges = bpe.train("../.data/TinyStoriesV2-GPT4-train.txt", 10000, ["<|endoftext|>"]) # time to execute: 279.89 secs
+    vocab, merges = bpe.train("../.data/owt_train.txt", 10000, ["<|endoftext|>"]) # 
     #vocab, merges = bpe.train("../tests/fixtures/corpus.en", 500, ["<|endoftext|>"])
 
     pr.disable()
