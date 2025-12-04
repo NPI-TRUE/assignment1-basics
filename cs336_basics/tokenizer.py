@@ -121,8 +121,8 @@ def count_chunk(args):
 
 def get_pre_tokens(input_path: str, speical_tokens: list, PAT: str) -> dict:
     with open(input_path, "rb") as f:
-        num_processes = min(8, multiprocessing.cpu_count())
-        boundaries = find_chunk_boundaries(f, 10, b"<|endoftext|>")
+        num_processes = min(7, multiprocessing.cpu_count())
+        boundaries = find_chunk_boundaries(f, 100, b"<|endoftext|>")
 
     print(f"Total cpu: {multiprocessing.cpu_count()}, used: {num_processes}")
 
@@ -155,6 +155,7 @@ class BPETokenizer():
         self.PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
         self.folder = '.data'
         os.makedirs(self.folder, exist_ok=True)
+        self.lock = threading.Lock()
         # Cache mapping token (str/bytes) -> tuple of decoder values
         # Avoid recomputing tuple(self.decoder[ch] for ch in token) repeatedly
         #self._bytes_cache = {}
@@ -173,25 +174,29 @@ class BPETokenizer():
                     
                     if left in self.pairs:
                         if self.pairs[left] > 0:
-                            self.pairs[left] -= cnt
+                            with self.lock:
+                                self.pairs[left] -= cnt
 
                     if right in self.pairs:
                         if self.pairs[right] > 0:
-                            self.pairs[right] -= cnt
+                            with self.lock:
+                                self.pairs[right] -= cnt
                     
                     new_word.append(self.vocab[token])
 
                     if i - 1 >= 0:
                         tpair = (word[i - 1], self.vocab[token]) 
-                        self.pairs[tpair] += cnt
-                        self.ids[tpair].append(idx)
+                        with self.lock:
+                            self.pairs[tpair] += cnt
+                            self.ids[tpair].append(idx)
                         update_pair.add((word[i - 1], self.vocab[token]))
                         #merges.append((-self.pairs[tpair], Token([self.decoder[ch] for ch in word[i - 1]]), decoded, (word[i - 1], self.vocab[token])))
 
                     if i + 2 < len(word):
                         tpair = (self.vocab[token], word[i + 2]) 
-                        self.pairs[tpair] += cnt
-                        self.ids[tpair].append(idx)
+                        with self.lock:
+                            self.pairs[tpair] += cnt
+                            self.ids[tpair].append(idx)
                         update_pair.add((self.vocab[token], word[i + 2]))
                         #merges.append((-self.pairs[tpair], decoded, Token([self.decoder[ch] for ch in word[i + 2]]), (self.vocab[token], word[i + 2])))
 
@@ -200,14 +205,15 @@ class BPETokenizer():
                     new_word.append(word[i])
                     i += 1
             
-            self.words[idx] = (new_word, cnt)
+            with self.lock:
+                self.words[idx] = (new_word, cnt)
 
     def train(
         self,
         input_path: str,
         vocab_size: int,
         special_tokens: list[str],
-        num_threads = 100
+        num_threads = 20
     ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
         """Given the path to an input corpus, run train a BPE tokenizer and
         output its vocabulary and merges.
@@ -265,10 +271,10 @@ class BPETokenizer():
         start_time = time.time()
         for iMerge in range(1, num_merges + 1):
             
-            if iMerge % 100 == 0: 
-                tot_time = time.time() - start_time
-                print(f"Merges: {iMerge}/{num_merges}, time: {tot_time:0.2f} sec, time to end: {((num_merges / iMerge) * tot_time) / 60:0.2f} min")
-                start_time = time.time()
+            #if iMerge % 100 == 0: 
+            tot_time = time.time() - start_time
+            print(f"Merges: {iMerge}/{num_merges}, time: {tot_time:0.2f} sec, time to end: {((num_merges - iMerge) * tot_time) / 60:0.2f} min")
+            start_time = time.time()
 
             if not pair:
                 break
@@ -279,7 +285,7 @@ class BPETokenizer():
             pcnt, pa, pb, pair = heapq.heappop(pq)
             pcnt = -pcnt
 
-            while (self.pairs[pair] != pcnt):
+            while (self.pairs[pair] != pcnt) and len(pq) != 0:
                 if (self.pairs[pair] > 0):
                     heapq.heappush(pq, (-self.pairs[pair], pa, pb, pair))
                 else:
@@ -287,6 +293,10 @@ class BPETokenizer():
 
                 pcnt, pa, pb, pair = heapq.heappop(pq)
                 pcnt = -pcnt
+
+            if len(pq) == 0:
+                print("Ehhh già si ferma proprio perché non ci sono più pair")
+                exit(0)
 
             #print(f"{tmp_pair == pair}  -  {tmp_pair}, {tmp_pcnt}  -  {pair}, {pcnt}")
 
@@ -390,7 +400,7 @@ if __name__ == "__main__":
     
     bpe = BPETokenizer()
     #vocab, merges = bpe.train("../.data/TinyStoriesV2-GPT4-valid.txt", 10000, ["<|endoftext|>"]) # time to execute: 279.89 secs
-    vocab, merges = bpe.train("../.data/owt_valid.txt", 10000, ["<|endoftext|>"]) # 
+    vocab, merges = bpe.train("../.data/owt_train.txt", 10000, ["<|endoftext|>"]) # 
     #vocab, merges = bpe.train("../tests/fixtures/corpus.en", 500, ["<|endoftext|>"])
 
     pr.disable()
