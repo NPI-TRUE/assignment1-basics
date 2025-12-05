@@ -165,12 +165,10 @@ class BPETokenizer():
         # Avoid recomputing tuple(self.decoder[ch] for ch in token) repeatedly
         #self._bytes_cache = {}
 
-    def merge(self, args):
-        token, pair, ids_list = args
-        update_pair = []
-
+    def merge(self, update_pair, token, pair, ids_list):
         for idx in ids_list:
-            word, cnt = self.words[idx]
+            with self.lock:
+                word, cnt = self.words[idx]
             new_word = []
 
             i = 0
@@ -179,41 +177,44 @@ class BPETokenizer():
                     left = (word[i - 1], word[i]) if i - 1 >= 0 else None
                     right = (word[i + 1], word[i + 2]) if i + 2 < len(word) else None
                     
-                    if left in self.pairs:
-                        if self.pairs[left] > 0:
-                            update_pair.append((left, -cnt, idx))
+                    with self.lock:
+                        if left in self.pairs:
+                            if self.pairs[left] > 0:
+                                self.pairs[left] -= cnt
 
-                    if right in self.pairs:
-                        if self.pairs[right] > 0:
-                            update_pair.append((right, -cnt, idx))
+                        if right in self.pairs:
+                            if self.pairs[right] > 0:
+                                self.pairs[right] -= cnt
                     
                     new_word.append(self.vocab[token])
 
                     if i - 1 >= 0:
                         tpair = (word[i - 1], self.vocab[token]) 
-                        self.pairs[tpair] += cnt
-                        self.ids[tpair].append(idx)
-                        update_pair.append((tpair, cnt, idx))
+                        with self.lock:
+                            self.pairs[tpair] += cnt
+                            self.ids[tpair].add(idx)
+                            update_pair.add(tpair)
 
                     if i + 2 < len(word):
                         tpair = (self.vocab[token], word[i + 2]) 
-                        update_pair.append((tpair, cnt, idx))
+                        with self.lock:
+                            self.pairs[tpair] += cnt
+                            self.ids[tpair].add(idx)
+                            update_pair.add(tpair)
 
                     i += 2
                 else:
                     new_word.append(word[i])
                     i += 1
             
-            self.words[idx] = (new_word, cnt)
-
-        return update_pair
+            with self.lock:
+                self.words[idx] = (new_word, cnt)
 
     def train(
         self,
         input_path: str,
         vocab_size: int,
         special_tokens: list[str],
-        num_threads = 30
     ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
         """Given the path to an input corpus, run train a BPE tokenizer and
         output its vocabulary and merges.
@@ -250,7 +251,7 @@ class BPETokenizer():
         self.words = [([self.vocab[token] for token in word], cnt) for word, cnt in pre_tokens.items()]
 
         self.pairs = defaultdict(int)
-        self.ids = defaultdict(list)
+        self.ids = defaultdict(set)
         pq = []
 
         for idx, (word, cnt) in enumerate(self.words):
@@ -260,7 +261,7 @@ class BPETokenizer():
                 #self._bytes_cache[a] = (self.decoder[a],)
                 #self._bytes_cache[b] = (self.decoder[b],)
                 self.pairs[pair] += cnt
-                self.ids[pair].append(idx)
+                self.ids[pair].add(idx)
 
         for (a, b), cnt in self.pairs.items():
             heapq.heappush(pq, (-cnt, Token([self.decoder[a]]), Token([self.decoder[b]]), tuple((a, b))))
@@ -317,33 +318,28 @@ class BPETokenizer():
             decoded = Token([self.decoder[ch] for ch in pair[0] + pair[1]])
 
             start_range = 0
-            word_per_thread = len(self.ids[pair]) // num_threads
+            word_per_thread = len(self.ids[pair]) // num_processes
             #print(f"DEBUG:  len(ids[pair]): {len(ids[pair])}  num_threads: {num_threads}  word_per_threads: {word_per_thread}")
 
-            args = []
+            threads = []
+            update_pair = set()
+            _ids = list(self.ids[pair])
 
-            for i in range(num_threads):
-                if i != num_threads - 1:
-                    args.append((token, pair, self.ids[pair][start_range:start_range + word_per_thread]))
+            for i in range(num_processes):
+                t = None
+                if i != num_processes - 1:
+                    t = threading.Thread(target=self.merge, args=(update_pair, token, pair, _ids[start_range:start_range + word_per_thread]))
                 else:
-                    args.append((token, pair, self.ids[pair][start_range:]))
+                    t = threading.Thread(target=self.merge, args=(update_pair, token, pair, _ids[start_range:]))
                     
+                t.start()
+                threads.append(t)
                 start_range += word_per_thread
 
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                results = executor.map(self.merge, args)
-                update_pair = list(chain.from_iterable(results))
+            for t in threads:
+                t.join()
 
-            unique_pairs = set()
-
-            for tpair, ucnt, cidx in update_pair:
-                self.pairs[tpair] += ucnt
-                unique_pairs.add(tpair)
-                
-                if ucnt > 0:
-                    self.ids[tpair].append(cidx)
-
-            for tpair in unique_pairs:
+            for tpair in update_pair:
                 if tpair[1] == self.vocab[token]:
                     heapq.heappush(pq, (-self.pairs[tpair], Token([self.decoder[ch] for ch in tpair[0]]), decoded, (tpair[0], self.vocab[token])))
                 else:
@@ -406,7 +402,7 @@ if __name__ == "__main__":
     
     bpe = BPETokenizer()
     #vocab, merges = bpe.train("../.data/TinyStoriesV2-GPT4-valid.txt", 10000, ["<|endoftext|>"]) # time to execute: 279.89 secs
-    vocab, merges = bpe.train("../.data/owt_valid.txt", 32000, ["<|endoftext|>"]) # 
+    vocab, merges = bpe.train("../.data/owt_train.txt", 32000, ["<|endoftext|>"]) # 
     #vocab, merges = bpe.train("../tests/fixtures/corpus.en", 500, ["<|endoftext|>"])
 
     pr.disable()
