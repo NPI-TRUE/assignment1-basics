@@ -272,13 +272,15 @@ class BPETokenizer():
 
         print("Start merging")
         start_time = time.time()
-        for iMerge in range(1, num_merges + 1):
+        from tqdm import tqdm
+        
+        for iMerge in tqdm(range(1, num_merges + 1)):
             
             #if iMerge % 100 == 0: 
-            tot_time = time.time() - start_time
-            tte = ((num_merges - iMerge) * tot_time) / 60
-            print(f"Merges: {iMerge}/{num_merges}, time: {tot_time:0.2f} sec, time to end: {tte:0.2f} min  ({tte / 60:0.2f} hours)")
-            start_time = time.time()
+            #tot_time = time.time() - start_time
+            #tte = ((num_merges - iMerge) * tot_time) / 60
+            #print(f"Merges: {iMerge}/{num_merges}, time: {tot_time:0.2f} sec, time to end: {tte:0.2f} min  ({tte / 60:0.2f} hours)")
+            #start_time = time.time()
             
             #tmp_pair, tmp_pcnt = max(self.pairs.items(), key=lambda kv: (kv[1], (self._bytes_cache[kv[0][0]], self._bytes_cache[kv[0][1]])))
 
@@ -402,7 +404,7 @@ if __name__ == "__main__":
     
     bpe = BPETokenizer()
     #vocab, merges = bpe.train("../.data/TinyStoriesV2-GPT4-valid.txt", 10000, ["<|endoftext|>"]) # time to execute: 279.89 secs
-    vocab, merges = bpe.train("../.data/owt_train.txt", 32000, ["<|endoftext|>"]) # 
+    vocab, merges = bpe.train("../.data/owt_valid.txt", 32000, ["<|endoftext|>"]) # 
     #vocab, merges = bpe.train("../tests/fixtures/corpus.en", 500, ["<|endoftext|>"])
 
     pr.disable()
