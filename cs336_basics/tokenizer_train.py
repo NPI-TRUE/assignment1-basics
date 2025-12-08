@@ -16,9 +16,18 @@ import regex as re
 
 num_processes = min(8, multiprocessing.cpu_count())
 
+class Token:
+    def __init__(self, val):
+        self.val = val
+    def __lt__(self, other):
+        return self.val > other.val   # invert lexicographic order
+    def __eq__(self, other):
+        return self.val == other.val
+    def __repr__(self):
+        return repr(self.val)
 
 def bytes_to_unicode():
-    bs = list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
+    bs = list(range(ord(" "), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
     cs = bs[:]
     # now get the representations of the other 68 integers that do need shifting
     # each will get mapped chr(256 + n), where n will grow from 0...67 in the loop
@@ -31,7 +40,7 @@ def bytes_to_unicode():
             bs.append(b)
             cs.append(2**8 + n)
             n += 1
-    characters = [chr(n).encode('utf-8') for n in cs]
+    characters = [chr(n) for n in cs]
     d = dict(zip(bs, characters))
     return d
 
@@ -95,11 +104,13 @@ def count_chunk(args):
     for text in re.split('|'.join(special_tokens), chunk):
         for match in re.finditer(PAT, text):
             word = match.group()
-            words[tuple(word.encode('utf-8'))] += 1
+            words[word] += 1
 
     return Counter(words)
 
 def get_pre_tokens(input_path: str, speical_tokens: list, PAT: str) -> dict:
+    from tqdm import tqdm
+
     global num_processes
     
     with open(input_path, "rb") as f:
@@ -119,20 +130,16 @@ def get_pre_tokens(input_path: str, speical_tokens: list, PAT: str) -> dict:
     print("Start reading chunks")
     
     with ProcessPoolExecutor(max_workers=num_processes) as executor:
-        for i, counter in enumerate(executor.map(count_chunk, chunks)):
-            print(f"Chunk: {i + 1}/{tot_cunks}")
-
+        for counter in tqdm(executor.map(count_chunk, chunks), total=tot_cunks):
             words += counter
-
-    print()
 
     return dict(words)
 
 class BPETokenizer():
     def __init__(self):
-        self.byte_ecoder= bytes_to_unicode()
-        self.vocab = {k:v for k, v in zip(range(len(self.byte_ecoder)), self.byte_ecoder.values())}
-        self.encoder = {v:k for k, v in self.vocab.items()}
+        self.btu = bytes_to_unicode()
+        self.utb = {v:k for k, v in self.btu.items()}
+        self.vocab = {}
         self.merges = []
 
         self.PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
@@ -216,6 +223,8 @@ class BPETokenizer():
         """
         from tqdm import tqdm
 
+        self.vocab = {k:v for k, v in zip(range(len(self.btu)), self.btu.values())}
+
         global num_processes
 
         self.special_tokens = special_tokens
@@ -224,7 +233,7 @@ class BPETokenizer():
 
         num_merges = vocab_size - len(self.vocab)
         pre_tokens = get_pre_tokens(input_path, self.special_tokens, self.PAT)
-        self.words = [([self.byte_ecoder[ch] for ch in word], cnt) for word, cnt in pre_tokens.items()]
+        self.words = [([self.btu[token] for token in word.encode('utf-8')], cnt) for word, cnt in pre_tokens.items()]
 
         self.pairs = defaultdict(int)
         self.ids = defaultdict(set)
@@ -237,21 +246,21 @@ class BPETokenizer():
                 self.ids[pair].add(idx)
 
         for (a, b), cnt in self.pairs.items():
-            heapq.heappush(pq, (-cnt, tuple((a, b))))
+            heapq.heappush(pq, (-cnt, Token([self.utb[ch] for ch in a]), Token([self.utb[ch] for ch in b]), tuple((a, b))))
 
-        print(f"Debug:      len(pairs): {len(self.pairs)}  -  len(words): {len(self.words)}  -  len(ids): {len(self.ids)}", "\n")
+        print(f"\nDebug:      len(pairs): {len(self.pairs)}  -  len(words): {len(self.words)}  -  len(ids): {len(self.ids)}", "\n")
 
         print("Start merging")
         
         for iMerge in tqdm(range(1, num_merges + 1)):
-            pcnt, pair = heapq.heappop(pq)
+            pcnt, pa, pb, pair = heapq.heappop(pq)
             pcnt = -pcnt
 
             while (self.pairs[pair] != pcnt) and len(pq) != 0:
                 if (self.pairs[pair] > 0):
-                    heapq.heappush(pq, (-self.pairs[pair], pair))
+                    heapq.heappush(pq, (-self.pairs[pair], pa, pb, pair))
 
-                pcnt, pair = heapq.heappop(pq)
+                pcnt, pa, pb, pair = heapq.heappop(pq)
                 pcnt = -pcnt
 
             if not pair:
@@ -263,7 +272,6 @@ class BPETokenizer():
 
             start_range = 0
             word_per_thread = len(self.ids[pair]) // num_processes
-            #print(f"DEBUG:  len(ids[pair]): {len(ids[pair])}  num_threads: {num_threads}  word_per_threads: {word_per_thread}")
 
             threads = []
             update_pair = set()
@@ -283,20 +291,74 @@ class BPETokenizer():
             for t in threads:
                 t.join()
 
+            decoded = Token([self.utb[ch] for ch in pair[0] + pair[1]])
+
             for tpair in update_pair:
                 if tpair[1] == self.vocab[token]:
-                    heapq.heappush(pq, (-self.pairs[tpair], (tpair[0], self.vocab[token])))
+                    heapq.heappush(pq, (-self.pairs[tpair], Token([self.utb[ch] for ch in tpair[0]]), decoded, (tpair[0], self.vocab[token])))
                 else:
-                    heapq.heappush(pq, (-self.pairs[tpair], (self.vocab[token], tpair[1])))
-
+                    heapq.heappush(pq, (-self.pairs[tpair], decoded, Token([self.utb[ch] for ch in tpair[1]]), (self.vocab[token], tpair[1])))
 
             del self.pairs[pair]
             del self.ids[pair]
 
+        self.vocab = {k: bytes([self.utb[ch] for ch in v]) for k, v in self.vocab.items()}
+        self.merges = [
+            (
+                bytes([self.utb[ch] for ch in token1]),
+                bytes([self.utb[ch] for ch in token2])
+            )
+            for token1, token2 in self.merges
+        ]
+
+        self.save()
+
         return self.vocab, self.merges
 
-if __name__ == "__main__":
-    bpe = BPETokenizer()
-    vocab, merges = bpe.train("../tests/fixtures/corpus.en", 500, ["<|endoftext|>"])
+    def save(self):
+        with open(f'{self.folder}/bpe_vocab.json', 'w', encoding='utf-8') as f:
+            json.dump({v.decode('utf-8', errors="replace"): k for k,v in self.vocab.items()}, f)
 
-    print(vocab, "\n\n", merges)
+        with open(f'{self.folder}/bpe_merges.json', 'w', encoding='utf-8') as f:
+            json.dump({a.decode('utf-8'):b.decode('utf-8') for a,b in self.merges}, f)
+
+    def load(self):
+        with open(f'{self.folder}/bpe_vocab.json', 'r', encoding='utf-8') as f:
+            self.encoder = json.load(f)
+            self.encoder = {k.encode('utf-8'): v for k, v in self.encoder.items()}
+
+            self.vocab = {
+                v: bytes([self.encoder[ch] for ch in k])
+                for k,v in self.encoder.items()
+            }
+
+        with open(f'{self.folder}/bpe_merges.json', 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+            self.merges = [
+                (
+                    bytes([self.encoder[token] for token in merge_token_1]),
+                    bytes([self.encoder[token] for token in merge_token_2])
+                )
+                for merge_token_1, merge_token_2 in data
+            ]
+
+if __name__ == "__main__":
+    import cProfile, pstats
+    
+    pr = cProfile.Profile()
+    pr.enable()
+
+    bpe = BPETokenizer()
+
+    vocab, merges = bpe.train("../tests/fixtures/corpus.en", 500, ["<|endoftext|>"])
+    #vocab, merges = bpe.train("../.data/TinyStoriesV2-GPT4-valid.txt", 10000, ["<|endoftext|>"]) # time to execute: 279.89 secs
+
+    print(vocab, merges)
+
+    pr.disable()
+    stats_path = "tokenizer_run.prof"
+    print(f"Profile saved to {stats_path}")
+
+    ps = pstats.Stats(pr).sort_stats("cumtime")
+    ps.print_stats(30)
