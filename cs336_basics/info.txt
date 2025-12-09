@@ -1,0 +1,37 @@
+Profile saved to tokenizer_run.prof
+         106181111 function calls (106053994 primitive calls) in 3030.962 seconds
+
+   Ordered by: cumulative time
+   List reduced from 566 to 30 due to restriction <30>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1  426.333  426.333 3036.715 3036.715 /home/nicola/Documents/assignment1-basics/cs336_basics/tokenizer.py:212(train)
+  1269679 2377.600    0.002 2377.600    0.002 {method 'acquire' of '_thread.lock' objects}
+   253945    0.526    0.000 1555.782    0.006 /home/nicola/.local/share/uv/python/cpython-3.11.13-linux-x86_64-gnu/lib/python3.11/threading.py:1087(join)
+   253945    0.390    0.000 1554.985    0.006 /home/nicola/.local/share/uv/python/cpython-3.11.13-linux-x86_64-gnu/lib/python3.11/threading.py:1125(_wait_for_tstate_lock)
+   253933    1.392    0.000  827.091    0.003 /home/nicola/.local/share/uv/python/cpython-3.11.13-linux-x86_64-gnu/lib/python3.11/threading.py:295(wait)
+        1    1.002    1.002  654.235  654.235 /home/nicola/Documents/assignment1-basics/cs336_basics/tokenizer.py:111(get_pre_tokens)
+    31795    0.095    0.000  575.356    0.018 /home/nicola/Documents/assignment1-basics/.venv/lib/python3.11/site-packages/tqdm/std.py:1160(__iter__)
+       51    0.000    0.000  571.804   11.212 /home/nicola/.local/share/uv/python/cpython-3.11.13-linux-x86_64-gnu/lib/python3.11/concurrent/futures/process.py:614(_chain_from_iterable_of_lists)
+       51    0.000    0.000  571.803   11.212 /home/nicola/.local/share/uv/python/cpython-3.11.13-linux-x86_64-gnu/lib/python3.11/concurrent/futures/_base.py:612(result_iterator)
+       50    0.000    0.000  571.803   11.436 /home/nicola/.local/share/uv/python/cpython-3.11.13-linux-x86_64-gnu/lib/python3.11/concurrent/futures/_base.py:314(_result_or_cancel)
+       50    0.001    0.000  571.802   11.436 /home/nicola/.local/share/uv/python/cpython-3.11.13-linux-x86_64-gnu/lib/python3.11/concurrent/futures/_base.py:428(result)
+   253946    1.254    0.000  268.938    0.001 /home/nicola/.local/share/uv/python/cpython-3.11.13-linux-x86_64-gnu/lib/python3.11/threading.py:945(start)
+   253946    2.817    0.000  259.629    0.001 /home/nicola/.local/share/uv/python/cpython-3.11.13-linux-x86_64-gnu/lib/python3.11/threading.py:611(wait)
+       50   31.997    0.640   81.222    1.624 /home/nicola/.local/share/uv/python/cpython-3.11.13-linux-x86_64-gnu/lib/python3.11/collections/__init__.py:915(__iadd__)
+       50    0.001    0.000   48.189    0.964 /home/nicola/.local/share/uv/python/cpython-3.11.13-linux-x86_64-gnu/lib/python3.11/collections/__init__.py:908(_keep_positive)
+       50   48.189    0.964   48.189    0.964 /home/nicola/.local/share/uv/python/cpython-3.11.13-linux-x86_64-gnu/lib/python3.11/collections/__init__.py:910(<listcomp>)
+  1731085   27.418    0.000   27.418    0.000 /home/nicola/Documents/assignment1-basics/cs336_basics/tokenizer.py:313(<listcomp>)
+   253946   18.526    0.000   24.971    0.000 /home/nicola/.local/share/uv/python/cpython-3.11.13-linux-x86_64-gnu/lib/python3.11/threading.py:856(__init__)
+  3683496   19.814    0.000   20.233    0.000 {built-in method _heapq.heappush}
+  6592339   19.839    0.000   19.839    0.000 /home/nicola/Documents/assignment1-basics/cs336_basics/tokenizer.py:251(<listcomp>)
+ 57388756   11.792    0.000   11.792    0.000 {method 'add' of 'set' objects}
+  1875959    9.599    0.000    9.599    0.000 /home/nicola/Documents/assignment1-basics/cs336_basics/tokenizer.py:315(<listcomp>)
+   253946    7.920    0.000    7.920    0.000 {built-in method _thread.start_new_thread}
+    19344    4.910    0.000    4.910    0.000 /home/nicola/Documents/assignment1-basics/cs336_basics/tokenizer.py:264(<listcomp>)
+     2482    0.036    0.000    3.451    0.001 /home/nicola/Documents/assignment1-basics/.venv/lib/python3.11/site-packages/tqdm/std.py:1198(update)
+     2484    0.015    0.000    3.387    0.001 /home/nicola/Documents/assignment1-basics/.venv/lib/python3.11/site-packages/tqdm/std.py:1325(refresh)
+     2486    0.015    0.000    3.188    0.001 /home/nicola/Documents/assignment1-basics/.venv/lib/python3.11/site-packages/tqdm/std.py:1464(display)
+   253947    0.465    0.000    3.016    0.000 /home/nicola/.local/share/uv/python/cpython-3.11.13-linux-x86_64-gnu/lib/python3.11/threading.py:562(__init__)
+     2486    0.020    0.000    2.761    0.001 /home/nicola/Documents/assignment1-basics/.venv/lib/python3.11/site-packages/tqdm/std.py:1150(__str__)
+     2486    0.129    0.000    2.713    0.001 /home/nicola/Documents/assignment1-basics/.venv/lib/python3.11/site-packages/tqdm/std.py:464(format_meter)
