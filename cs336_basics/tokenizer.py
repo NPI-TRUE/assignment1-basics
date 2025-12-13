@@ -1,48 +1,7 @@
-from collections import Counter, defaultdict
-from typing import BinaryIO
-
-from concurrent.futures import ProcessPoolExecutor
-from concurrent.futures import ThreadPoolExecutor
-import multiprocessing
-
-import heapq
-
-import os
-import time
-import threading
-
+from typing import Iterable, Iterator, BinaryIO
 import json
 import regex as re
-
-num_processes = min(8, multiprocessing.cpu_count())
-
-class Token:
-    def __init__(self, val):
-        self.val = val
-    def __lt__(self, other):
-        return self.val > other.val   # invert lexicographic order
-    def __eq__(self, other):
-        return self.val == other.val
-    def __repr__(self):
-        return repr(self.val)
-
-def bytes_to_unicode():
-    bs = list(range(ord(" "), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
-    cs = bs[:]
-    # now get the representations of the other 68 integers that do need shifting
-    # each will get mapped chr(256 + n), where n will grow from 0...67 in the loop
-    # Get printable representations of the remaining integers 68 integers.
-    n = 0
-    for b in range(2**8):
-        if b not in bs:
-            # If this integer isn't in our list of visually-representable
-            # charcters, then map it to the next nice character (offset by 256)
-            bs.append(b)
-            cs.append(2**8 + n)
-            n += 1
-    characters = [chr(n) for n in cs]
-    d = dict(zip(bs, characters))
-    return d
+import os
 
 def find_chunk_boundaries(
     file: BinaryIO,
@@ -90,292 +49,143 @@ def find_chunk_boundaries(
     # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
     return sorted(set(chunk_boundaries))
 
-def count_chunk(args):
-    input_path, special_tokens, start, end, PAT = args
+def bytes_to_unicode():
+    bs = list(range(ord(" "), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
+    cs = bs[:]
+    # now get the representations of the other 68 integers that do need shifting
+    # each will get mapped chr(256 + n), where n will grow from 0...67 in the loop
+    # Get printable representations of the remaining integers 68 integers.
+    n = 0
+    for b in range(2**8):
+        if b not in bs:
+            # If this integer isn't in our list of visually-representable
+            # charcters, then map it to the next nice character (offset by 256)
+            bs.append(b)
+            cs.append(2**8 + n)
+            n += 1
+    characters = [chr(n) for n in cs]
+    d = dict(zip(bs, characters))
+    return d
 
-    PAT = re.compile(PAT)
-
-    with open(input_path, "rb") as f:
-        f.seek(start)
-        chunk = f.read(end - start).decode("utf-8", errors="ignore")
-
-    words = defaultdict(int)
-
-    for text in re.split('|'.join(special_tokens), chunk):
-        for match in re.finditer(PAT, text):
-            word = match.group()
-            words[word] += 1
-
-    return Counter(words)
-
-def get_pre_tokens(input_path: str, speical_tokens: list, PAT: str) -> dict:
-    from tqdm import tqdm
-
-    global num_processes
-    
-    with open(input_path, "rb") as f:
-        boundaries = find_chunk_boundaries(f, 50, b"<|endoftext|>")
-
-    print(f"Total cpu: {multiprocessing.cpu_count()}, used: {num_processes}")
-
-    words = Counter({})
-
-    chunks = []
-
-    for start, end in zip(boundaries[:-1], boundaries[1:]):
-        chunks.append((input_path, speical_tokens, start, end, PAT))
-
-    tot_cunks = len(chunks)
-
-    print("Start reading chunks")
-    
-    with ProcessPoolExecutor(max_workers=num_processes) as executor:
-        for counter in tqdm(executor.map(count_chunk, chunks), total=tot_cunks):
-            words += counter
-
-    return dict(words)
-
-class BPETokenizer():
-    def __init__(self):
-        self.btu = bytes_to_unicode()
-        self.utb = {v:k for k, v in self.btu.items()}
-        self.vocab = {}
-        self.merges = []
-
+class Tokenizer():
+    def __init__(self, vocab: dict[int, bytes] | None = None, merges: list[tuple[bytes, bytes]] | None = None, special_tokens: list[str] | None = None):
+        self.vocab = vocab
+        self.encoder = {v:k for k, v in self.vocab.items()} if self.vocab else {}
+        self.merges = merges
+        self.special_tokens = special_tokens
         self.PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+    
+    def from_files(self, vocab_filepath: str, merges_filepath: str, special_tokens: list[str] | None = None):
+        utb = {v:k for k, v in bytes_to_unicode().items()}
 
-        self.lock = threading.Lock()
+        with open(vocab_filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
 
-        self.folder = '.data'
-        os.makedirs(self.folder, exist_ok=True)
+            self.encoder = {bytes([utb[c] for c in k]): v for k, v in data.items()}
+            self.vocab = {v: k for k, v in self.encoder.items()}
+
+        with open(merges_filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+            self.merges = [
+                (
+                    bytes([utb[token] for token in merge_token_1]),
+                    bytes([utb[token] for token in merge_token_2])
+                )
+                for merge_token_1, merge_token_2 in data
+            ]
+            
+        self.special_tokens = special_tokens
 
     def encode(self, text: str) -> list[int]:
         pre_tokens = []
 
         if self.special_tokens:
-            for t in re.split('|'.join(self.special_tokens), text):
+            for t in re.split(r'(' + '|'.join(self.special_tokens) + ')', text):
+                if t in self.encoder:
+                    pre_tokens.append(t)
+                    continue
+                
                 for match in re.finditer(self.PAT, t):
                     word = match.group()
-                    pre_tokens.append(tuple(word.encode('utf-8')))
+                    pre_tokens.append([bytes([c]) for ch in word for c in ch.encode('utf-8')])
+                
         else:
             for match in re.finditer(self.PAT, text):
                 word = match.group()
-                pre_tokens.append(tuple(word.encode('utf-8')))
+                pre_tokens.append([bytes([c]) for ch in word for c in ch.encode('utf-8')])
 
-        print(pre_tokens)
 
-    def merge(self, update_pair, token, pair, ids_list):
-        for idx in ids_list:
-            with self.lock:
-                word, cnt = self.words[idx]
-            new_word = []
+        encoded = []
 
-            i = 0
-            while i < len(word):
-                if i + 1 < len(word) and word[i] == pair[0] and word[i + 1] == pair[1]:
-                    left = (word[i - 1], word[i]) if i - 1 >= 0 else None
-                    right = (word[i + 1], word[i + 2]) if i + 2 < len(word) else None
-                    
-                    with self.lock:
-                        if left in self.pairs:
-                            if self.pairs[left] > 0:
-                                self.pairs[left] -= cnt
+        pairs = {}
 
-                        if right in self.pairs:
-                            if self.pairs[right] > 0:
-                                self.pairs[right] -= cnt
-                    
-                    new_word.append(self.vocab[token])
-
-                    if i - 1 >= 0:
-                        tpair = (word[i - 1], self.vocab[token]) 
-                        with self.lock:
-                            self.pairs[tpair] += cnt
-                            self.ids[tpair].add(idx)
-                            update_pair.add(tpair)
-
-                    if i + 2 < len(word):
-                        tpair = (self.vocab[token], word[i + 2]) 
-                        with self.lock:
-                            self.pairs[tpair] += cnt
-                            self.ids[tpair].add(idx)
-                            update_pair.add(tpair)
-
-                    i += 2
-                else:
-                    new_word.append(word[i])
-                    i += 1
+        for idx, ptoken in enumerate(pre_tokens):
+            if isinstance(ptoken[0], str):
+                continue
             
-            with self.lock:
-                self.words[idx] = (new_word, cnt)
+            for a, b in zip(ptoken, ptoken[1:]):
+                tpair = (a, b)
 
-    def train(
-        self,
-        input_path: str,
-        vocab_size: int,
-        special_tokens: list[str],
-    ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-        """Given the path to an input corpus, run train a BPE tokenizer and
-        output its vocabulary and merges.
+                if tpair not in pairs:
+                    pairs[tpair] = set()
 
-        Args:
-            input_path (str | os.PathLike): Path to BPE tokenizer training data.
-            vocab_size (int): Total number of items in the tokenizer's vocabulary (including special tokens).
-            special_tokens (list[str]): A list of string special tokens to be added to the tokenizer vocabulary.
-                These strings will never be split into multiple tokens, and will always be
-                kept as a single token. If these special tokens occur in the `input_path`,
-                they are treated as any other string.
+                pairs[tpair].add(idx)
 
-        Returns:
-            tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-                vocab:
-                    The trained tokenizer vocabulary, a mapping from int (token ID in the vocabulary)
-                    to bytes (token bytes)
-                merges:
-                    BPE merges. Each list item is a tuple of bytes (<token1>, <token2>),
-                    representing that <token1> was merged with <token2>.
-                    Merges are ordered by order of creation.
-        """
-        from tqdm import tqdm
+        for merge in self.merges:
+            if merge in pairs:
+                for idx in pairs[merge]:
+                    ptoken = pre_tokens[idx]
 
-        self.vocab = {k:v for k, v in zip(range(len(self.btu)), self.btu.values())}
+                    new_ptoken = []
 
-        global num_processes
+                    i = 0
+                    while i < len(ptoken):
+                        if i + 1 < len(ptoken) and ptoken[i] == merge[0] and ptoken[i + 1] == merge[1]:
+                            new_ptoken.append(ptoken[i] + ptoken[i + 1])
+                            i += 2
+                        else:
+                            new_ptoken.append(ptoken[i])
+                            i += 1
 
-        self.special_tokens = special_tokens
-        for stoken in special_tokens:
-            self.vocab[len(self.vocab)] = stoken
+                    pre_tokens[idx] = new_ptoken
 
-        num_merges = vocab_size - len(self.vocab)
-        pre_tokens = get_pre_tokens(input_path, self.special_tokens, self.PAT)
-        self.words = [([self.btu[token] for token in word.encode('utf-8')], cnt) for word, cnt in pre_tokens.items()]
+                    for a, b in zip(new_ptoken, new_ptoken[1:]):
+                        tpair = (a, b)
 
-        self.pairs = defaultdict(int)
-        self.ids = defaultdict(set)
-        pq = []
+                        if tpair not in pairs:
+                            pairs[tpair] = set()
 
-        for idx, (word, cnt) in enumerate(self.words):
-            for a, b in zip(word, word[1:]):
-                pair = (a, b)
-                self.pairs[pair] += cnt
-                self.ids[pair].add(idx)
+                        pairs[tpair].add(idx)
 
-        for (a, b), cnt in self.pairs.items():
-            heapq.heappush(pq, (-cnt, Token([self.utb[ch] for ch in a]), Token([self.utb[ch] for ch in b]), tuple((a, b))))
-
-        print(f"\nDebug:      len(pairs): {len(self.pairs)}  -  len(words): {len(self.words)}  -  len(ids): {len(self.ids)}", "\n")
-
-        print("Start merging")
+        for ptoken in pre_tokens:
+            if isinstance(ptoken[0], str):
+                encoded.extend(self.encoder[ptoken.encode('utf-8')])
+            else:
+                encoded.extend([self.encoder[ch] for ch in ptoken])
         
-        for iMerge in tqdm(range(1, num_merges + 1)):
-            pcnt, pa, pb, pair = heapq.heappop(pq)
-            pcnt = -pcnt
+        return encoded
 
-            while (self.pairs[pair] != pcnt) and len(pq) != 0:
-                if (self.pairs[pair] > 0):
-                    heapq.heappush(pq, (-self.pairs[pair], pa, pb, pair))
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        boundaries = find_chunk_boundaries(file=iterable, desired_num_chunks=10, split_special_token=b"<|endoftext|>")
 
-                pcnt, pa, pb, pair = heapq.heappop(pq)
-                pcnt = -pcnt
+        for start, end in zip(boundaries[:-1], boundaries[1:]):
+            iterable.seek(start)
+            text = iterable.read(end - start).decode("utf-8", errors="ignore")
 
-            if not pair:
-                break
+            yield self.encode(text)
 
-            token = len(self.vocab)
-            self.vocab[token] = pair[0] + pair[1]
-            self.merges.append((pair[0], pair[1]))
-
-            start_range = 0
-            word_per_thread = len(self.ids[pair]) // num_processes
-
-            threads = []
-            update_pair = set()
-            _ids = list(self.ids[pair])
-
-            for i in range(num_processes):
-                t = None
-                if i != num_processes - 1:
-                    t = threading.Thread(target=self.merge, args=(update_pair, token, pair, _ids[start_range:start_range + word_per_thread]))
-                else:
-                    t = threading.Thread(target=self.merge, args=(update_pair, token, pair, _ids[start_range:]))
-                    
-                t.start()
-                threads.append(t)
-                start_range += word_per_thread
-
-            for t in threads:
-                t.join()
-
-            decoded = Token([self.utb[ch] for ch in pair[0] + pair[1]])
-
-            for tpair in update_pair:
-                if tpair[1] == self.vocab[token]:
-                    heapq.heappush(pq, (-self.pairs[tpair], Token([self.utb[ch] for ch in tpair[0]]), decoded, (tpair[0], self.vocab[token])))
-                else:
-                    heapq.heappush(pq, (-self.pairs[tpair], decoded, Token([self.utb[ch] for ch in tpair[1]]), (self.vocab[token], tpair[1])))
-
-            del self.pairs[pair]
-            del self.ids[pair]
-
-        self.save()
-
-        self.vocab = {k: bytes([self.utb[ch] for ch in v]) for k, v in self.vocab.items()}
-        self.merges = [
-            (
-                bytes([self.utb[ch] for ch in token1]),
-                bytes([self.utb[ch] for ch in token2])
-            )
-            for token1, token2 in self.merges
-        ]
-
-        return self.vocab, self.merges
-
-    def save(self):
-        with open(f'{self.folder}/bpe_vocab.json', 'w', encoding='utf-8') as f:
-            json.dump({v:k for k, v in self.vocab.items()}, f)
-
-        with open(f'{self.folder}/bpe_merges.json', 'w', encoding='utf-8') as f:
-            json.dump(self.merges, f)
-
-    def from_files(self, vocab_filepath: str, merges_filepath: str, special_tokens: list[str] | None = None):
-        with open(vocab_filepath, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-
-            self.vocab = {
-                v: bytes([self.utb[ch] for ch in k])
-                for k,v in data.items()
-            }
-
-        with open(merges_filepath, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            
-            self.merges = [
-                (
-                    bytes([self.utb[ch] for ch in token1]),
-                    bytes([self.utb[ch] for ch in token2])
-                )
-                for token1, token2 in data
-            ]
-            
-        self.special_tokens = special_tokens
-
-def train_bpe(input_path, vocab_size, special_tokens):
-    import cProfile, pstats
+    def decode(self, ids: list[int]) -> str:
+        return b''.join([self.vocab[ch] for ch in ids]).decode('utf-8', errors='replace')
     
-    pr = cProfile.Profile()
-    pr.enable()
-
-    bpe = BPETokenizer()
-
-    bpe.train(input_path, vocab_size, special_tokens)
-
-    pr.disable()
-    stats_path = "tokenizer_run.prof"
-    print(f"Profile saved to {stats_path}")
-
-    ps = pstats.Stats(pr).sort_stats("cumtime")
-    ps.print_stats(30)
-
 if __name__ == "__main__":
-    #train_bpe("../tests/fixtures/corpus.en", 500, ["<|endoftext|>"])
-    train_bpe("../.data/owt_train.txt", 32000, ["<|endoftext|>"])
+    bpe = Tokenizer()
+    bpe.from_files("tok_file/bpe_vocab_owt.json", "tok_file/bpe_merges_owt.json", ["<|endoftext|>"])
+
+    print(bpe.decode(bpe.encode("🙃")))
+    print(bpe.decode(bpe.encode("Hello world!<|endoftext|>")))
+
+    ids = bpe.encode("Héllò hôw <|endoftext|><|endoftext|> are ü? 🙃<|endoftext|>")
+
+    for idx in ids:
+        print(idx, bpe.vocab[idx], bpe.decode([idx]))
