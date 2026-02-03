@@ -2,6 +2,7 @@ from typing import Iterable, Iterator, BinaryIO
 import json
 import regex as re
 import os
+import itertools
 
 def find_chunk_boundaries(
     file: BinaryIO,
@@ -67,12 +68,38 @@ def bytes_to_unicode():
     d = dict(zip(bs, characters))
     return d
 
+def safe_flatten(data): 
+    if data and isinstance(data[0], list):
+        return list(itertools.chain.from_iterable(data))
+        
+    return data
+
 class Tokenizer():
-    def __init__(self, vocab: dict[int, bytes] | None = None, merges: list[tuple[bytes, bytes]] | None = None, special_tokens: list[str] | None = None):
+    def __init__(self, 
+                 vocab: dict[int, bytes] | None = None, 
+                 merges: list[tuple[bytes, bytes]] | None = None, 
+                 special_tokens: list[str] | None = None
+                 ):
         self.vocab = vocab
         self.encoder = {v:k for k, v in self.vocab.items()} if self.vocab else {}
+
+        if special_tokens is not None:
+            max_index = max([k for k, v in vocab.items()])
+
+            for stoken in special_tokens:
+                stoken = stoken.encode()
+
+                if stoken not in self.encoder:
+                    max_index += 1
+                    self.encoder[stoken] = max_index
+                    
+                self.vocab[max_index] = stoken
+
+            self.special_tokens = sorted(special_tokens, key=lambda x: len(x), reverse=True) 
+
+        else:
+            self.special_tokens = None
         self.merges = merges
-        self.special_tokens = special_tokens
         self.PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
     
     def from_files(self, vocab_filepath: str, merges_filepath: str, special_tokens: list[str] | None = None):
@@ -81,19 +108,28 @@ class Tokenizer():
         with open(vocab_filepath, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
-            self.encoder = {bytes([utb[c] for c in k]): v for k, v in data.items()}
-            self.vocab = {v: k for k, v in self.encoder.items()}
+        max_index = max([v for k, v in data.items()])
+
+        self.encoder = {bytes([utb[c] for c in k]): v for k, v in data.items()}
+
+        if special_tokens is not None:
+            special_tokens = sorted(special_tokens, key=lambda x: len(x), reverse=True)
+            for stoken in  special_tokens:
+                max_index += 1
+                self.encoder[stoken.encode()] = max_index
+
+        self.vocab = {v: k for k, v in self.encoder.items()}
 
         with open(merges_filepath, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
-            self.merges = [
-                (
-                    bytes([utb[token] for token in merge_token_1]),
-                    bytes([utb[token] for token in merge_token_2])
-                )
-                for merge_token_1, merge_token_2 in data
-            ]
+        self.merges = [
+            (
+                bytes([utb[token] for token in merge_token_1]),
+                bytes([utb[token] for token in merge_token_2])
+            )
+            for merge_token_1, merge_token_2 in data
+        ]
             
         self.special_tokens = special_tokens
 
@@ -101,8 +137,8 @@ class Tokenizer():
         pre_tokens = []
 
         if self.special_tokens:
-            for t in re.split(r'(' + '|'.join(self.special_tokens) + ')', text):
-                if t in self.encoder:
+            for t in re.split(r'(' + '|'.join(re.escape(st) for st in self.special_tokens) + ')', text):
+                if t in self.special_tokens:
                     pre_tokens.append(t)
                     continue
                 
@@ -116,12 +152,11 @@ class Tokenizer():
                 pre_tokens.append([bytes([c]) for ch in word for c in ch.encode('utf-8')])
 
 
-        encoded = []
 
         pairs = {}
 
         for idx, ptoken in enumerate(pre_tokens):
-            if isinstance(ptoken[0], str):
+            if isinstance(ptoken, str):
                 continue
             
             for a, b in zip(ptoken, ptoken[1:]):
@@ -136,7 +171,7 @@ class Tokenizer():
             if merge in pairs:
                 for idx in pairs[merge]:
                     ptoken = pre_tokens[idx]
-
+                    
                     new_ptoken = []
 
                     i = 0
@@ -158,34 +193,43 @@ class Tokenizer():
 
                         pairs[tpair].add(idx)
 
+
+        encoded = []
+
         for ptoken in pre_tokens:
-            if isinstance(ptoken[0], str):
-                encoded.extend(self.encoder[ptoken.encode('utf-8')])
+            if isinstance(ptoken, str):
+                encoded.extend([self.encoder[ptoken.encode('utf-8')]])
             else:
                 encoded.extend([self.encoder[ch] for ch in ptoken])
         
         return encoded
 
     def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
-        boundaries = find_chunk_boundaries(file=iterable, desired_num_chunks=10, split_special_token=b"<|endoftext|>")
+        binary_file = getattr(iterable, "buffer", iterable)
+        boundaries = find_chunk_boundaries(file=binary_file, 
+                                           desired_num_chunks=10, 
+                                           split_special_token=b"<|endoftext|>")
 
         for start, end in zip(boundaries[:-1], boundaries[1:]):
-            iterable.seek(start)
-            text = iterable.read(end - start).decode("utf-8", errors="ignore")
+            binary_file.seek(start)
+            text = binary_file.read(end - start).decode("utf-8", errors="ignore")
 
             yield self.encode(text)
 
     def decode(self, ids: list[int]) -> str:
+        ids = safe_flatten(ids)
         return b''.join([self.vocab[ch] for ch in ids]).decode('utf-8', errors='replace')
     
 if __name__ == "__main__":
     bpe = Tokenizer()
-    bpe.from_files("tok_file/bpe_vocab_owt.json", "tok_file/bpe_merges_owt.json", ["<|endoftext|>"])
+    bpe.from_files("tok_file/bpe_vocab_owt.json", "tok_file/bpe_merges_owt.json", ["<|endoftext|>", "<|endoftext|><|endoftext|>"])
 
-    print(bpe.decode(bpe.encode("🙃")))
-    print(bpe.decode(bpe.encode("Hello world!<|endoftext|>")))
+    #print(bpe.decode(bpe.encode("🙃")))
+    #print(bpe.decode(bpe.encode("Hello world!<|endoftext|>")))
 
     ids = bpe.encode("Héllò hôw <|endoftext|><|endoftext|> are ü? 🙃<|endoftext|>")
+
+    print(bpe.decode(ids))
 
     for idx in ids:
         print(idx, bpe.vocab[idx], bpe.decode([idx]))
